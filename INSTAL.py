@@ -4,6 +4,7 @@ import logging
 import sqlite3
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
+from aiohttp import web  # Render platformasi uchun kerak
 import yt_dlp
 
 # --- SOZLAMALAR ---
@@ -14,10 +15,16 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
+# --- RENDER UCHUN VEB-SERVER (Bot o'chib qolmasligi uchun) ---
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+app = web.Application()
+app.router.add_get('/', handle)
+
 # --- MA'LUMOTLAR BAZASI ---
-conn = sqlite3.connect("users.db")
+conn = sqlite3.connect("users.db", check_same_thread=False)
 cursor = conn.cursor()
-# Bazaga 'lang' ustunini qo'shdik
 cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, lang TEXT DEFAULT 'uz')")
 conn.commit()
 
@@ -83,9 +90,14 @@ def get_download_menu(url, lang):
 
 # --- YUKLASH FUNKSIYASI ---
 def download_media(url, mode):
-    filename = "result.mp3" if mode == "mp3" else "result.mp4"
+    filename = f"result_{mode}.{'mp3' if mode == 'mp3' else 'mp4'}"
     if os.path.exists(filename): os.remove(filename)
-    ydl_opts = {'outtmpl': filename, 'max_filesize': 48 * 1024 * 1024, 'quiet': True}
+    ydl_opts = {
+        'outtmpl': filename, 
+        'max_filesize': 48 * 1024 * 1024, 
+        'quiet': True,
+        'nocheckcertificate': True
+    }
     if mode == "mp3":
         ydl_opts['format'] = 'bestaudio/best'
     else:
@@ -100,11 +112,6 @@ async def start_handler(message: types.Message):
     lang = get_language(message.from_user.id)
     await message.answer(TEXTS[lang]["start"], reply_markup=get_lang_keyboard())
 
-@dp.message_handler(commands=['lang'])
-async def lang_cmd(message: types.Message):
-    lang = get_language(message.from_user.id)
-    await message.answer(TEXTS[lang]["lang_select"], reply_markup=get_lang_keyboard())
-
 @dp.callback_query_handler(lambda c: c.data.startswith('setlang|'))
 async def set_lang_callback(callback: types.CallbackQuery):
     lang = callback.data.split("|")[1]
@@ -117,16 +124,11 @@ async def link_handler(message: types.Message):
     lang = get_language(message.from_user.id)
     if "http" in message.text:
         await message.answer(TEXTS[lang]["format"], reply_markup=get_download_menu(message.text, lang))
-    else:
-        await message.answer(TEXTS[lang]["start"])
 
 @dp.callback_query_handler(lambda c: '|' in c.data and not c.data.startswith('setlang'))
 async def download_callback(callback: types.CallbackQuery):
     lang = get_language(callback.from_user.id)
     mode, url = callback.data.split("|")
-    
-    if url == "none": return await callback.answer("!")
-
     status_msg = await bot.send_message(callback.message.chat.id, TEXTS[lang]["wait"])
     
     try:
@@ -140,9 +142,20 @@ async def download_callback(callback: types.CallbackQuery):
                 await bot.send_video(callback.message.chat.id, file, caption=TEXTS[lang]["success"])
             
         os.remove(file_path)
-        await bot.delete_message(callback.message.chat.id, status_msg.message_id)
-    except Exception as e:
-        await bot.send_message(callback.message.chat.id, f"{TEXTS[lang]['error']}")
+    except Exception:
+        await bot.send_message(callback.message.chat.id, TEXTS[lang]["error"])
+    await bot.delete_message(callback.message.chat.id, status_msg.message_id)
 
+# --- RUN (Render uchun moslangan qism) ---
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    loop = asyncio.get_event_loop()
+    
+    # Veb-serverni Render uchun fonda ishga tushirish
+    runner = web.AppRunner(app)
+    loop.run_until_complete(runner.setup())
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    loop.create_task(site.start())
+    
+    # Botni ishga tushirish
     executor.start_polling(dp, skip_updates=True)
